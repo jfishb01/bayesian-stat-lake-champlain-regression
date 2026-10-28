@@ -1,0 +1,8 @@
+.python-version
+.venv/
+uv.lock
+deliverables
+*_backup.py
+model
+.DS_Store
+__pycache__/
