@@ -6,7 +6,15 @@ import matplotlib.pyplot as plt
 from cmdstanpy import CmdStanModel
 
 RESPONSE = "elevation"
-PREDICTORS = ["year_offset", "sin_day_of_year", "cos_day_of_year"]
+PREDICTORS = [
+    "year_offset",
+    "sin_annual_harmonic",
+    "cos_annual_harmonic",
+    "sin_second_harmonic",
+    "cos_second_harmonic",
+    "sin_third_harmonic",
+    "cos_third_harmonic",
+]
 # These are test parameters
 GLOBAL_HYPERPARAMETERS = {
     "hyperparam_alpha_mu": 0,
@@ -97,8 +105,12 @@ def load_and_transform(data_file) -> tuple[pd.DataFrame, pd.Series]:  # Return X
         2 * np.pi * (((df["date"].dt.dayofyear - 1) / 365.25) % 1)
     )  # Scale the day of year beween 0 and 2pi
     # Compute the sin and cosine components for the day of year
-    df["sin_day_of_year"] = np.sin(scaled_day_of_year)
-    df["cos_day_of_year"] = np.cos(scaled_day_of_year)
+    df["sin_annual_harmonic"] = np.sin(scaled_day_of_year)
+    df["cos_annual_harmonic"] = np.cos(scaled_day_of_year)
+    df["sin_second_harmonic"] = np.sin(2 * scaled_day_of_year)
+    df["cos_second_harmonic"] = np.cos(2 * scaled_day_of_year)
+    df["sin_third_harmonic"] = np.sin(3 * scaled_day_of_year)
+    df["cos_third_harmonic"] = np.cos(3 * scaled_day_of_year)
 
     df = df.set_index("date")
     return df[PREDICTORS], df[RESPONSE]
@@ -343,11 +355,23 @@ def generate_data_exploration_plots(X, Y):
     # Plot regressions against each predictor
     _plot_regression(X.index.year, Y.values, "Year")  # yearly regression
     _plot_regression(
-        X["sin_day_of_year"], Y.values, "sin(Day of Year)"
+        X["sin_annual_harmonic"], Y.values, "sin(Day of Year)"
     )  # sin day of year regression
     _plot_regression(
-        X["cos_day_of_year"], Y.values, "cos(Day of Year)"
+        X["cos_annual_harmonic"], Y.values, "cos(Day of Year)"
     )  # cos day of year regression
+    _plot_regression(
+        X["sin_second_harmonic"], Y.values, "sin(2 * Day of Year)"
+    )  # sin 2 * day of year regression
+    _plot_regression(
+        X["cos_second_harmonic"], Y.values, "cos(2 * Day of Year)"
+    )  # cos 2 * day of year regression
+    _plot_regression(
+        X["sin_third_harmonic"], Y.values, "sin(3 * Day of Year)"
+    )  # sin 3 * day of year regression
+    _plot_regression(
+        X["cos_third_harmonic"], Y.values, "cos(3 * Day of Year)"
+    )  # cos 3 * day of year regression
 
 
 def main(data_file, debug):

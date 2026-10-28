@@ -36,8 +36,8 @@ As a Burlington resident, the health of Lake Champlain is important to me from b
 
 ### Likelihood: 
 
-$\vec{Y}|\alpha,\vec{\beta},\sigma \sim Normal(\vec{\mu}, \sigma)$\
-$\vec{\mu} = \alpha + \underline{\underline{X}}\vec{\beta}$
+$Y_{i}|\alpha,\beta,\sigma \sim Normal(\mu_i, \sigma)$\
+$\mu_i = \alpha + \beta_i X_i$
 
 ### Priors
 
