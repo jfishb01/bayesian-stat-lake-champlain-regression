@@ -8,7 +8,7 @@
         real<lower=0> hyperparam_alpha_sigma;
         real hyperparam_beta_mu;
         real<lower=0> hyperparam_beta_sigma;
-        real<lower=0> hyperparam_sigma_beta;
+        real<lower=0> hyperparam_sigma;
         int<lower=0, upper=1> use_likelihood;
     }
     parameters {
@@ -22,7 +22,7 @@
     model {
         alpha ~ normal(hyperparam_alpha_mu, hyperparam_alpha_sigma);
         beta ~ normal(hyperparam_beta_mu, hyperparam_beta_sigma);
-        sigma ~ exponential(hyperparam_sigma_beta);
+        sigma ~ exponential(hyperparam_sigma);
         if (use_likelihood) {
             Y ~ normal(mu, sigma);
         }

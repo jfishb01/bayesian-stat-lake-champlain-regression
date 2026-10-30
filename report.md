@@ -34,15 +34,35 @@ As a Burlington resident, the health of Lake Champlain is important to me from b
 
 ## 3. Model description
 
-### Likelihood: 
+### Likelihood
 
-$Y_{i}|\alpha,\beta,\sigma \sim Normal(\mu_i, \sigma)$\
-$\mu_i = \alpha + \beta_i X_i$
+**Annual Model** (one observation per complete year, $y = 1, \dots, 18$)
+
+$\bar{Y}_y \mid \alpha, \beta, \sigma \sim Normal(\mu_y, \sigma)$\
+$\mu_y = \alpha + \beta \cdot \text{year\_offset}_y$
+
+where $\bar{Y}_y$ is the mean water surface elevation in year $y$ and $\text{year\_offset}_y$ is the number of years since 2008.
+
+**Harmonic Model** (one observation per day, $i = 1, \dots, N$)
+
+$Y_i - \bar{Y}_{y[i]} \mid \alpha, \vec{\beta}, \sigma \sim Normal(\mu_i, \sigma)$\
+$\mu_i = \alpha + \beta_1 \sin(t_i) + \beta_2 \cos(t_i) + \beta_3 \sin(2t_i) + \beta_4 \cos(2t_i) + \beta_5 \sin(3t_i) + \beta_6 \cos(3t_i)$\
+$t_i = 2\pi \cdot \frac{\text{day\_of\_year}_i - 1}{365.25}$
+
+where $Y_i - \bar{Y}_{y[i]}$ is day $i$'s elevation minus the mean elevation of its year.
 
 ### Priors
 
-$\alpha \sim Normal(\mu=100, \sigma=10)$\
-$ \vec{\beta} \sim Normal(\mu=0, \sigma=5)$\
+**Annual Model**
+
+$\alpha \sim Normal(\mu=96.5, \sigma=2)$\
+$\beta \sim Normal(\mu=0, \sigma=0.1)$\
+$\sigma \sim Exponential(\beta=1)$
+
+**Harmonic Model**
+
+$\alpha \sim Normal(\mu=0, \sigma=1)$\
+$\vec{\beta} \sim Normal(\mu=0, \sigma=5)$\
 $\sigma \sim Exponential(\beta=0.25)$
 
 ## 4. Prior-predictive analysis

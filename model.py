@@ -6,8 +6,8 @@ import matplotlib.pyplot as plt
 from cmdstanpy import CmdStanModel
 
 RESPONSE = "elevation"
-PREDICTORS = [
-    "year_offset",
+ANNUAL_PREDICTORS = ["year_offset"]
+HARMONIC_PREDICTORS = [
     "sin_annual_harmonic",
     "cos_annual_harmonic",
     "sin_second_harmonic",
@@ -15,23 +15,34 @@ PREDICTORS = [
     "sin_third_harmonic",
     "cos_third_harmonic",
 ]
+# Years with fewer daily observations than this are dropped (partial years bias the annual mean by season)
+MIN_DAYS_PER_YEAR = 350
+
 # These are test parameters
 GLOBAL_HYPERPARAMETERS = {
     "hyperparam_alpha_mu": 0,
     "hyperparam_alpha_sigma": 100,
     "hyperparam_beta_mu": 0,
     "hyperparam_beta_sigma": 100,
-    "hyperparam_sigma_beta": 0.25,
+    "hyperparam_sigma": 0.25,
 }
-# These are the final parameters used by the model
-ALPHA_BETA_HYPERPARAMETERS = {
-    "hyperparam_alpha_mu": 100,
-    "hyperparam_alpha_sigma": 10,
+# These are the final parameters used by the models
+ANNUAL_HYPERPARAMETERS = {
+    "hyperparam_alpha_mu": 96.5,
+    "hyperparam_alpha_sigma": 2,
+    "hyperparam_beta_mu": 0.0,
+    "hyperparam_beta_sigma": 0.1,
+    "hyperparam_sigma": 1,
+}
+HARMONIC_HYPERPARAMETERS = {
+    "hyperparam_alpha_mu": 0,
+    "hyperparam_alpha_sigma": 1,
     "hyperparam_beta_mu": 0,
     "hyperparam_beta_sigma": 5,
-    "hyperparam_sigma_beta": 0.25,
+    "hyperparam_sigma": 0.25,
 }
 
+# One Stan program serves both models; only the data passed in differs
 STAN_MODEL = """
     data {
         int<lower=1> N;
@@ -42,7 +53,7 @@ STAN_MODEL = """
         real<lower=0> hyperparam_alpha_sigma;
         real hyperparam_beta_mu;
         real<lower=0> hyperparam_beta_sigma;
-        real<lower=0> hyperparam_sigma_beta;
+        real<lower=0> hyperparam_sigma;
         int<lower=0, upper=1> use_likelihood;
     }
     parameters {
@@ -56,7 +67,7 @@ STAN_MODEL = """
     model {
         alpha ~ normal(hyperparam_alpha_mu, hyperparam_alpha_sigma);
         beta ~ normal(hyperparam_beta_mu, hyperparam_beta_sigma);
-        sigma ~ exponential(hyperparam_sigma_beta);
+        sigma ~ exponential(hyperparam_sigma);
         if (use_likelihood) {
             Y ~ normal(mu, sigma);
         }
@@ -67,15 +78,16 @@ STAN_MODEL = """
     """
 
 
-def generate_model(stan_model_code):
-    with open("model.stan", "w") as f:
+def generate_model(stan_model_code, stan_file="model.stan"):
+    with open(stan_file, "w") as f:
         f.write(stan_model_code)
 
-    model = CmdStanModel(stan_file="model.stan")
+    model = CmdStanModel(stan_file=stan_file)
     return model
 
 
-def load_and_transform(data_file) -> tuple[pd.DataFrame, pd.Series]:  # Return X, Y
+def load_daily(data_file) -> pd.DataFrame:
+    """Load raw 15-min data and return one row per day with year and harmonic features."""
     with open(data_file, "r") as f:
         df = pd.read_csv(
             f,
@@ -98,9 +110,7 @@ def load_and_transform(data_file) -> tuple[pd.DataFrame, pd.Series]:  # Return X
     df = (
         df.groupby("date").agg({"elevation": "mean"}).reset_index()
     )  # Use the daily mean elevation
-    df["year_offset"] = df["date"].dt.year - min(
-        df["date"].dt.year
-    )  # Get the year offset since out start date (2007)
+    df["year"] = df["date"].dt.year
     scaled_day_of_year = (
         2 * np.pi * (((df["date"].dt.dayofyear - 1) / 365.25) % 1)
     )  # Scale the day of year beween 0 and 2pi
@@ -112,16 +122,37 @@ def load_and_transform(data_file) -> tuple[pd.DataFrame, pd.Series]:  # Return X
     df["sin_third_harmonic"] = np.sin(3 * scaled_day_of_year)
     df["cos_third_harmonic"] = np.cos(3 * scaled_day_of_year)
 
-    df = df.set_index("date")
-    return df[PREDICTORS], df[RESPONSE]
+    return df.set_index("date")
+
+
+def build_annual_dataset(daily) -> tuple[pd.DataFrame, pd.Series]:
+    """One row per complete year: annual mean elevation regressed on year offset."""
+    days_per_year = daily.groupby("year")[RESPONSE].count()
+    complete_years = days_per_year[days_per_year >= MIN_DAYS_PER_YEAR].index
+
+    annual = (
+        daily[daily["year"].isin(complete_years)]
+        .groupby("year")[RESPONSE]
+        .mean()
+        .to_frame()
+    )
+    annual["year_offset"] = annual.index - annual.index.min()  # 0 = first complete year
+    return annual[ANNUAL_PREDICTORS], annual[RESPONSE]
+
+
+def build_harmonic_dataset(daily, Y_annual) -> tuple[pd.DataFrame, pd.Series]:
+    """One row per day: elevation minus that year's annual mean, regressed on the harmonics."""
+    harmonic = daily[daily["year"].isin(Y_annual.index)].copy()
+    harmonic["elevation_anomaly"] = harmonic[RESPONSE] - harmonic["year"].map(Y_annual)
+    return harmonic[HARMONIC_PREDICTORS], harmonic["elevation_anomaly"]
 
 
 def get_model_inputs(X, Y, hyperparameters):
     data = {
         "N": len(X),
         "q": X.shape[1],
-        "X": X,
-        "Y": Y,
+        "X": X.to_numpy(),
+        "Y": Y.to_numpy(),
         **hyperparameters,
     }
     return data
@@ -141,10 +172,22 @@ def generate_posterior_predictive(model, model_inputs):
     return fit_posterior
 
 
-def plot_predictive_summary(fit, Y, subtitle, label="Prior", n_draws=20, seed=42):
+def plot_predictive_summary(
+    fit,
+    Y,
+    predictors,
+    subtitle,
+    label="Prior",
+    xlabel="Date",
+    ylabel="Water Surface Elevation (ft)",
+    n_draws=20,
+    seed=42,
+):
     """One-figure summary of a prior or posterior fit: predictive draws over time + parameter distributions."""
     rng = np.random.default_rng(seed)
-    dates = Y.index
+    x_values = Y.index
+    few_points = len(Y) < 100  # annual model has ~18 points; daily model has thousands
+    draw_alpha, draw_size, obs_size = (0.3, 10, 30) if few_points else (0.02, 1, 2)
 
     # Draws from the fit
     y_rep_draws = fit.stan_variable("Y_rep")  # (n_samples, N)
@@ -158,7 +201,7 @@ def plot_predictive_summary(fit, Y, subtitle, label="Prior", n_draws=20, seed=42
 
     param_draws = (
         [("alpha (intercept)", alpha_draws)]
-        + [(f"beta: {name}", beta_draws[:, i]) for i, name in enumerate(PREDICTORS)]
+        + [(f"beta: {name}", beta_draws[:, i]) for i, name in enumerate(predictors)]
         + [("sigma", sigma_draws)]
     )
 
@@ -169,7 +212,7 @@ def plot_predictive_summary(fit, Y, subtitle, label="Prior", n_draws=20, seed=42
     # Top row: predictive distribution over time
     ax_time = fig.add_subplot(grid[0, :])
     ax_time.fill_between(
-        dates,
+        x_values,
         y_rep_lower,
         y_rep_upper,
         color="C0",
@@ -178,22 +221,22 @@ def plot_predictive_summary(fit, Y, subtitle, label="Prior", n_draws=20, seed=42
     )
     for k, draw_idx in enumerate(rng.choice(len(y_rep_draws), n_draws, replace=False)):
         ax_time.scatter(
-            dates,
+            x_values,
             y_rep_draws[draw_idx],
-            s=1,
+            s=draw_size,
             color="k",
-            alpha=0.02,
+            alpha=draw_alpha,
             rasterized=True,
             label=f"{n_draws} predictive draws" if k == 0 else None,
         )
-    ax_time.plot(dates, y_rep_mean, color="C0", linewidth=1.5, label="Predictive mean")
+    ax_time.plot(x_values, y_rep_mean, color="C0", linewidth=1.5, label="Predictive mean")
     if label == "Posterior":
         ax_time.scatter(
-            dates, Y.to_numpy(), s=2, color="C3", alpha=0.5, label="Observed"
+            x_values, Y.to_numpy(), s=obs_size, color="C3", alpha=0.5, label="Observed"
         )
-    ax_time.set_xlabel("Date")
-    ax_time.set_ylabel("Water Surface Elevation (ft)")
-    ax_time.legend(loc="upper left", markerscale=5, frameon=False)
+    ax_time.set_xlabel(xlabel)
+    ax_time.set_ylabel(ylabel)
+    ax_time.legend(loc="upper left", markerscale=5 if not few_points else 1, frameon=False)
     ax_time.grid(alpha=0.3)
 
     # Bottom row: parameter distributions
@@ -211,12 +254,12 @@ def plot_predictive_summary(fit, Y, subtitle, label="Prior", n_draws=20, seed=42
     plt.show()
 
 
-def summarize_posterior(fit, interval=0.95, max_points=2000, seed=0):
+def summarize_posterior(fit, predictors, interval=0.95, max_points=2000, seed=0):
     """Pair plot of all unknown parameters plus a median / equal-tailed-interval summary table."""
     # Collect posterior draws, one column per scalar parameter
     beta_draws = fit.stan_variable("beta")
     draws = pd.DataFrame({"alpha": fit.stan_variable("alpha")})
-    for i, name in enumerate(PREDICTORS):
+    for i, name in enumerate(predictors):
         draws[f"beta_{name}"] = beta_draws[:, i]
     draws["sigma"] = fit.stan_variable("sigma")
     params = list(draws.columns)
@@ -235,7 +278,7 @@ def summarize_posterior(fit, interval=0.95, max_points=2000, seed=0):
         index=params,
     )
 
-    print(summary.round(4).to_string())
+    print(summary[["mean", "sd"]].round(2).to_string())
 
     # Pair plot
     rng = np.random.default_rng(seed)
@@ -312,6 +355,85 @@ def summarize_posterior(fit, interval=0.95, max_points=2000, seed=0):
     plt.show()
 
 
+def _plot_predictive_panel(ax, x_values, rep_draws, observed, title, ylabel, rng, n_draws=20):
+    """One panel in the style of plot_predictive_summary: 95% band, draws, mean, observed."""
+    few_points = len(observed) < 100  # annual panel has ~18 points; daily panels have thousands
+    draw_alpha, draw_size, obs_size = (0.3, 10, 30) if few_points else (0.02, 1, 2)
+
+    rep_mean = rep_draws.mean(axis=0)
+    rep_lower, rep_upper = np.percentile(rep_draws, [2.5, 97.5], axis=0)
+    coverage = ((observed >= rep_lower) & (observed <= rep_upper)).mean()
+    print(f"{title}")
+
+    ax.fill_between(x_values, rep_lower, rep_upper, color="C0", alpha=0.1,
+                    label="95% predictive interval")
+    for k, draw_idx in enumerate(rng.choice(len(rep_draws), n_draws, replace=False)):
+        ax.scatter(x_values, rep_draws[draw_idx], s=draw_size, color="k", alpha=draw_alpha,
+                   rasterized=True, label=f"{n_draws} predictive draws" if k == 0 else None)
+    ax.plot(x_values, rep_mean, color="C0", linewidth=1.5, label="Predictive mean")
+    ax.scatter(x_values, observed, s=obs_size, color="C3", alpha=0.5, label="Observed")
+    ax.set_title(f"{title}", fontsize=11)
+    ax.set_ylabel(ylabel)
+    ax.grid(alpha=0.3)
+
+
+def plot_combined_model(fit_annual, fit_harmonic, Y_annual, Y_harmonic, Y_observed,
+                        n_draws=20, seed=42):
+    """Three stacked predictive panels over the full record.
+
+    Top:    annual model (annual mean elevation), plotted at mid-year.
+    Middle: harmonic model (daily elevation minus that year's mean).
+    Bottom: both combined (daily elevation), with the annual trend line.
+
+    The two models were fit separately, so their posterior draws are independent and can be
+    paired by index when combining them.
+    """
+    rng = np.random.default_rng(seed)
+
+    annual_mu = fit_annual.stan_variable("mu")          # (n_samples, n_years): trend line
+    annual_rep = fit_annual.stan_variable("Y_rep")      # (n_samples, n_years): trend + year noise
+    seasonal_rep = fit_harmonic.stan_variable("Y_rep")  # (n_samples, n_days): cycle + daily noise
+    n_samples = min(len(annual_rep), len(seasonal_rep))
+
+    years = Y_annual.index.to_numpy()
+    mid_year_dates = pd.to_datetime([f"{year}-07-01" for year in years])
+    dates = Y_observed.index                       # same days, in the same order, as Y_harmonic
+    year_pos = np.searchsorted(years, dates.year)  # each day's row in the annual model
+
+    # Layout: the two individual models side by side on top, the combined model full-width below
+    fig = plt.figure(figsize=(16, 11), layout="constrained")
+    grid = fig.add_gridspec(2, 2)
+    ax_combined = fig.add_subplot(grid[1, :])
+    ax_annual = fig.add_subplot(grid[0, 0], sharex=ax_combined)
+    ax_season = fig.add_subplot(grid[0, 1], sharex=ax_combined)
+    fig.suptitle("Annual model, harmonic model, and both combined", fontsize=14)
+
+    # ---- Panel 1: annual model --------------------------------------------------------------
+    _plot_predictive_panel(ax_annual, mid_year_dates, annual_rep, Y_annual.to_numpy(),
+                           title="Annual model", ylabel="Annual Mean Elevation (ft)",
+                           rng=rng, n_draws=n_draws)
+    ax_annual.legend(loc="upper right", fontsize=8, frameon=False)
+
+    # ---- Panel 2: harmonic model ------------------------------------------------------------
+    _plot_predictive_panel(ax_season, dates, seasonal_rep, Y_harmonic.to_numpy(),
+                           title="Harmonic model", ylabel="Elevation Minus Annual Mean (ft)",
+                           rng=rng, n_draws=n_draws)
+    ax_season.legend(loc="upper right", fontsize=8, frameon=False, markerscale=5)
+
+    # ---- Panel 3: combined model + annual trend ---------------------------------------------
+    combined_rep = annual_rep[:n_samples, year_pos] + seasonal_rep[:n_samples]
+    _plot_predictive_panel(ax_combined, dates, combined_rep, Y_observed.to_numpy(),
+                           title="Combined model (annual + harmonic)",
+                           ylabel="Water Surface Elevation (ft)", rng=rng, n_draws=n_draws)
+    trend_mean = annual_mu.mean(axis=0)[year_pos]
+    ax_combined.plot(dates, trend_mean, color="C1", linestyle="--", linewidth=2,
+                     label="Annual trend")
+    ax_combined.set_xlabel("Date")
+    ax_combined.legend(loc="upper right", fontsize=8, frameon=False, markerscale=5)
+
+    plt.show()
+
+
 def generate_data_exploration_plots(X, Y):
     def _plot_regression(_X, _Y, xlabel):
         plt.scatter(
@@ -375,25 +497,69 @@ def generate_data_exploration_plots(X, Y):
 
 
 def main(data_file, debug):
-    X, Y = load_and_transform(data_file)
+    daily = load_daily(data_file)
+    X_annual, Y_annual = build_annual_dataset(daily)
+    X_harmonic, Y_harmonic = build_harmonic_dataset(daily, Y_annual)
     model = generate_model(stan_model_code=STAN_MODEL)
-    hyperparameters = {
-        "separate alpha and beta hyperparameters": ALPHA_BETA_HYPERPARAMETERS
+
+    model_configs = {
+        "annual": {
+            "X": X_annual,
+            "Y": Y_annual,
+            "predictors": ANNUAL_PREDICTORS,
+            "hyperparameters": ANNUAL_HYPERPARAMETERS,
+            "xlabel": "Year",
+            "ylabel": "Annual Mean Water Surface Elevation (ft)",
+        },
+        "harmonic": {
+            "X": X_harmonic,
+            "Y": Y_harmonic,
+            "predictors": HARMONIC_PREDICTORS,
+            "hyperparameters": HARMONIC_HYPERPARAMETERS,
+            "xlabel": "Date",
+            "ylabel": "Elevation Minus Annual Mean (ft)",
+        },
     }
+
     if debug:
-        generate_data_exploration_plots(X, Y)
-        hyperparameters["uniform alpha and beta hyperparameters"] = (
-            GLOBAL_HYPERPARAMETERS
-        )
-    for k, hyperparam_set in hyperparameters.items():
-        model_inputs = get_model_inputs(X=X, Y=Y, hyperparameters=hyperparam_set)
-        fit_prior = generate_prior_predictive(model, model_inputs)
+        generate_data_exploration_plots(daily, daily[RESPONSE])
+
+    final_posteriors = {}  # posterior fits with the final hyperparameters, for the combined plot
+    for model_name, config in model_configs.items():
+        hyperparameter_sets = {f"{model_name} hyperparameters": config["hyperparameters"]}
         if debug:
-            plot_predictive_summary(fit_prior, Y, subtitle=k, label="Prior")
-        else:
-            fit_posterior = generate_posterior_predictive(model, model_inputs)
-            summarize_posterior(fit_posterior)
-            plot_predictive_summary(fit_posterior, Y, subtitle=k, label="Posterior")
+            hyperparameter_sets[f"{model_name} test hyperparameters"] = GLOBAL_HYPERPARAMETERS
+
+        for subtitle, hyperparam_set in hyperparameter_sets.items():
+            model_inputs = get_model_inputs(
+                X=config["X"], Y=config["Y"], hyperparameters=hyperparam_set
+            )
+            plot_kwargs = dict(
+                Y=config["Y"],
+                predictors=config["predictors"],
+                subtitle=subtitle,
+                xlabel=config["xlabel"],
+                ylabel=config["ylabel"],
+            )
+            if debug:
+                fit_prior = generate_prior_predictive(model, model_inputs)
+                plot_predictive_summary(fit_prior, label="Prior", **plot_kwargs)
+            else:
+                fit_posterior = generate_posterior_predictive(model, model_inputs)
+                summarize_posterior(fit_posterior, predictors=config["predictors"])
+                plot_predictive_summary(fit_posterior, label="Posterior", **plot_kwargs)
+                if hyperparam_set is config["hyperparameters"]:
+                    final_posteriors[model_name] = fit_posterior
+
+    if not debug:
+        days = Y_harmonic.index  # complete years only, same days the harmonic model used
+        plot_combined_model(
+            fit_annual=final_posteriors["annual"],
+            fit_harmonic=final_posteriors["harmonic"],
+            Y_annual=Y_annual,
+            Y_harmonic=Y_harmonic,
+            Y_observed=daily.loc[days, RESPONSE],
+        )
 
 
 if __name__ == "__main__":
